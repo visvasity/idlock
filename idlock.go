@@ -287,7 +287,7 @@ func (c *client) wait(ctx context.Context) bool {
 	m.waiting = append(m.waiting, c)
 	defer m.removeWaiter(c)
 
-	for m.isLockAllWaitingAhead(c) || m.isAnyIDLocked(c.ids) || m.isAnyIDWantedAhead(c) {
+	for m.isLockAllRunning() || m.isLockAllWaitingAhead(c) || m.isAnyIDLocked(c.ids) || m.isAnyIDWantedAhead(c) {
 		if ctx.Err() != nil {
 			return false
 		}
@@ -330,6 +330,10 @@ func (m *Mutex) removeWaiter(c *client) {
 		panic("client is not found in the waiting list")
 	}
 	m.waiting = slices.Delete(m.waiting, p, p+1)
+}
+
+func (m *Mutex) isLockAllRunning() bool {
+	return len(m.running) == 1 && m.running[0].all
 }
 
 func (m *Mutex) isLockAllWaitingAhead(c *client) bool {
