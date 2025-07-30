@@ -30,7 +30,7 @@ func BenchmarkMutexContention(b *testing.B) {
 				}
 
 				// Launch specified number of goroutines
-				for i := 0; i < routines; i++ {
+				for range routines {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
@@ -39,7 +39,7 @@ func BenchmarkMutexContention(b *testing.B) {
 						// Wait for start signal
 						<-start
 						// Perform Lock/Unlock iterations
-						for j := 0; j < iterations; j++ {
+						for range iterations {
 							mu.Lock()
 							mu.Unlock()
 						}
@@ -47,7 +47,7 @@ func BenchmarkMutexContention(b *testing.B) {
 				}
 
 				// Wait for all goroutines to be ready
-				for i := 0; i < routines; i++ {
+				for range routines {
 					<-ready
 				}
 
@@ -85,10 +85,10 @@ func BenchmarkIDLockMutexContention(b *testing.B) {
 					iterations = 1
 				}
 
-				var mu Mutex
+				var mu Mutex[int]
 
 				// Launch specified number of goroutines
-				for i := 0; i < routines; i++ {
+				for i := range routines {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
@@ -97,7 +97,7 @@ func BenchmarkIDLockMutexContention(b *testing.B) {
 						// Wait for start signal
 						<-start
 						// Perform Lock/Unlock iterations
-						for j := 0; j < iterations; j++ {
+						for range iterations {
 							unlock, err := mu.Lock(ctx, i)
 							if err != nil {
 								b.Fatal(err)
@@ -108,7 +108,7 @@ func BenchmarkIDLockMutexContention(b *testing.B) {
 				}
 
 				// Wait for all goroutines to be ready
-				for i := 0; i < routines; i++ {
+				for range routines {
 					<-ready
 				}
 

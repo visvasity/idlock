@@ -2,14 +2,9 @@
 
 // Package idlock provides a Mutex type for synchronizing access to resources
 // identified by comparable IDs from an unbounded ID space. It allows locking
-// and unlocking of multiple IDs of different types (e.g., strings, integers)
-// in a thread-safe manner. The package supports both selective locking of
-// specific IDs and exclusive locking of the entire ID space, with support for
-// context-aware operations and non-blocking attempts via TryLock methods.
-//
-// Use this package when you need to coordinate access to resources identified by
-// unique, comparable keys, such as in distributed systems, caching layers, or
-// concurrent data processing.
+// of multiple ids at once and unlocking of individual locked ids progressively
+// or all locked IDs. Mutexes also support exclusive locking of the entire ID
+// space if necessary.
 package idlock
 
 import (
@@ -20,59 +15,47 @@ import (
 )
 
 // Mutex provides a thread-safe mechanism for mutual exclusion over resources
-// identified by comparable IDs (e.g., strings, integers, or any type satisfying
-// the comparable constraint). It supports locking multiple IDs of different types
-// simultaneously, ensuring exclusive access to the associated resources. The
-// mutex can also lock the entire ID space for exclusive access.
+// identified by comparable IDs (e.g., strings, integers, or different types
+// that can be used as a map keys). Users can also lock the entire ID space
+// for exclusive access.
 //
 // Zero values of Mutex type can be used directly without initialization. The
 // mutex is safe for concurrent use by multiple goroutines.
-type Mutex struct {
+type Mutex[T any] struct {
 	mu sync.Mutex
 
 	// waiting holds clients waiting for one or more ids in FIFO order.
-	waiting []*client
+	waiting []*client[T]
 
 	// List of lock entries that have acquired ids successfully.
-	running []*client
+	running []*client[T]
 
 	// lockedIDMap holds list of ids that are currently locked to their
 	// respective client. When this map is empty, it may mean no ids are locked
 	// or all ids are locked depending on len(running) is zero or one.
-	lockedIDMap map[any]*client
+	lockedIDMap map[any]*client[T]
 }
 
-type client struct {
-	owner *Mutex
+type client[T any] struct {
+	owner *Mutex[T]
 
 	cond sync.Cond
 
 	all bool
 
-	ids []any
+	ids []T
 }
 
-// LockAll acquires exclusive access to the entire ID space, preventing any other
-// calls to [Mutex.Lock] or [Mutex.LockAll] from succeeding until the lock is
-// released. It blocks until the ID space is available or the provided context is
-// canceled. If the context is canceled, it returns a non-nil error from
-// [context.Cause].
+// LockAll acquires exclusive access to the entire ID space, preventing any
+// other calls to [Mutex.Lock] or [Mutex.LockAll] from succeeding until the
+// lock is released. It blocks until the ID space is available or the input
+// context is canceled. If the context is canceled, it returns a non-nil error
+// from [context.Cause].
 //
 // The returned function releases the exclusive lock, allowing other lock
 // operations to proceed.
-//
-// Example:
-//
-//	var mutex Mutex
-//	ctx := context.Background()
-//	unlock, err := mutex.LockAll(ctx)
-//	if err != nil {
-//	    // Handle error
-//	}
-//	defer unlock() // Release exclusive lock
-//	// Critical section with exclusive access
-func (m *Mutex) LockAll(ctx context.Context) (unlockAll func(), err error) {
-	c := &client{
+func (m *Mutex[T]) LockAll(ctx context.Context) (unlockAll func(), err error) {
+	c := &client[T]{
 		owner: m,
 		all:   true,
 		cond: sync.Cond{
@@ -87,10 +70,11 @@ func (m *Mutex) LockAll(ctx context.Context) (unlockAll func(), err error) {
 
 // TryLockAll is similar to LockAll, but fails with (nil, false) if caller has
 // to block due to lock unavailability.
-func (m *Mutex) TryLockAll() (unlockAll func(), ok bool) {
+func (m *Mutex[T]) TryLockAll() (unlockAll func(), ok bool) {
 	// Use an already canceled context.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	unlock, err := m.LockAll(ctx)
 	if err != nil {
 		return nil, false
@@ -107,25 +91,12 @@ func (m *Mutex) TryLockAll() (unlockAll func(), ok bool) {
 // The returned function unlocks the specified IDs. If no IDs are passed to the
 // unlock function, it releases all locked IDs. If specific IDs are provided, they
 // must be unique and previously locked by this call; otherwise, it panics.
-//
-// Example:
-//
-//	var mutex Mutex
-//	ctx := context.Background()
-//	unlock, err := mutex.Lock(ctx, "user1", 42)
-//	if err != nil {
-//	    // Handle error
-//	}
-//	defer unlock() // Unlock all IDs
-//	// Critical section for "user1" and 42
-//	unlock(42)
-//	// Critical section for "user1" but not for 42
-func (m *Mutex) Lock(ctx context.Context, ids ...any) (unlockIDs func(ids ...any), err error) {
+func (m *Mutex[T]) Lock(ctx context.Context, ids ...T) (unlockIDs func(ids ...T), err error) {
 	if len(ids) == 0 {
 		panic("no input ids")
 	}
 
-	c := &client{
+	c := &client[T]{
 		owner: m,
 		cond: sync.Cond{
 			L: &m.mu,
@@ -140,10 +111,11 @@ func (m *Mutex) Lock(ctx context.Context, ids ...any) (unlockIDs func(ids ...any
 
 // TryLock is similar to [Lock], but fails with (nil, false) if caller has to
 // block due to lock unavailability.
-func (m *Mutex) TryLock(ids ...any) (unlockIDs func(ids ...any), ok bool) {
+func (m *Mutex[T]) TryLock(ids ...T) (unlockIDs func(ids ...T), ok bool) {
 	// Use an already canceled context.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	unlock, err := m.Lock(ctx, ids...)
 	if err != nil {
 		return nil, false
@@ -151,7 +123,7 @@ func (m *Mutex) TryLock(ids ...any) (unlockIDs func(ids ...any), ok bool) {
 	return unlock, true
 }
 
-func (c *client) unlockAll() {
+func (c *client[T]) unlockAll() {
 	m := c.owner
 
 	m.mu.Lock()
@@ -179,10 +151,10 @@ func (c *client) unlockAll() {
 	}
 }
 
-func (c *client) unlock(ids ...any) {
+func (c *client[T]) unlock(ids ...T) {
 	// Check that all input ids belong to the client.
 	for i, v := range ids {
-		if !slices.Contains(c.ids, v) {
+		if !slices.ContainsFunc(c.ids, func(x T) bool { return any(x) == any(v) }) {
 			panic(fmt.Sprintf("input id %d=%v wasn't locked by this client", i, v))
 		}
 	}
@@ -236,7 +208,7 @@ func (c *client) unlock(ids ...any) {
 
 // wait blocks till it acquires the ids necessary for a lock operation
 // represented by the entry.
-func (c *client) wait(ctx context.Context) bool {
+func (c *client[T]) wait(ctx context.Context) bool {
 	stopf := context.AfterFunc(ctx, func() {
 		c.cond.L.Lock()
 		c.cond.Signal()
@@ -251,7 +223,7 @@ func (c *client) wait(ctx context.Context) bool {
 
 	// Lazy initialize the map.
 	if m.lockedIDMap == nil {
-		m.lockedIDMap = make(map[any]*client)
+		m.lockedIDMap = make(map[any]*client[T])
 	}
 
 	// A LockAll client can proceed only if,
@@ -308,14 +280,14 @@ func (c *client) wait(ctx context.Context) bool {
 	return true
 }
 
-func (c *client) removeIDs(ids []any) {
+func (c *client[T]) removeIDs(ids []T) {
 	if len(ids) > 0 {
-		if &ids[0] == c.ids[0] {
+		if &ids[0] == &c.ids[0] {
 			c.ids = slices.Delete(c.ids, 0, len(ids))
 			return
 		}
 		for _, id := range ids {
-			p := slices.Index(c.ids, id)
+			p := slices.IndexFunc(c.ids, func(x T) bool { return any(x) == any(id) })
 			if p == -1 {
 				panic(fmt.Sprintf("id %v not found in the client id list", id))
 			}
@@ -324,7 +296,7 @@ func (c *client) removeIDs(ids []any) {
 	}
 }
 
-func (m *Mutex) removeWaiter(c *client) {
+func (m *Mutex[T]) removeWaiter(c *client[T]) {
 	p := slices.Index(m.waiting, c)
 	if p == -1 {
 		panic("client is not found in the waiting list")
@@ -332,11 +304,11 @@ func (m *Mutex) removeWaiter(c *client) {
 	m.waiting = slices.Delete(m.waiting, p, p+1)
 }
 
-func (m *Mutex) isLockAllRunning() bool {
+func (m *Mutex[T]) isLockAllRunning() bool {
 	return len(m.running) == 1 && m.running[0].all
 }
 
-func (m *Mutex) isLockAllWaitingAhead(c *client) bool {
+func (m *Mutex[T]) isLockAllWaitingAhead(c *client[T]) bool {
 	p := slices.Index(m.waiting, c)
 	if p == -1 {
 		panic("input client is not in the waiting list")
@@ -349,7 +321,7 @@ func (m *Mutex) isLockAllWaitingAhead(c *client) bool {
 	return false
 }
 
-func (m *Mutex) isAnyIDLocked(ids []any) bool {
+func (m *Mutex[T]) isAnyIDLocked(ids []T) bool {
 	for _, id := range ids {
 		if _, ok := m.lockedIDMap[id]; ok {
 			return true
@@ -358,7 +330,7 @@ func (m *Mutex) isAnyIDLocked(ids []any) bool {
 	return false
 }
 
-func (m *Mutex) isAnyIDWantedAhead(c *client) bool {
+func (m *Mutex[T]) isAnyIDWantedAhead(c *client[T]) bool {
 	idMap := make(map[any]struct{}, len(c.ids))
 	for _, id := range c.ids {
 		idMap[id] = struct{}{}
